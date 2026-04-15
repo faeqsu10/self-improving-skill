@@ -202,6 +202,31 @@ def evaluate(hook_input: dict) -> dict:
     return session_record
 
 
+def find_project_root(cwd: str) -> str | None:
+    """cwd에서 위로 올라가며 .self-improve 파일이 있는 프로젝트 루트를 찾는다."""
+    current = Path(cwd).resolve()
+    home = Path.home().resolve()
+    while current >= home:
+        if (current / ".self-improve").exists():
+            return str(current)
+        if current == home:
+            break
+        current = current.parent
+    return None
+
+
+def load_project_config(project_root: str) -> dict:
+    """프로젝트의 .self-improve 파일에서 커스텀 설정을 읽는다."""
+    config_path = Path(project_root) / ".self-improve"
+    try:
+        content = config_path.read_text().strip()
+        if content:
+            return json.loads(content)
+    except (json.JSONDecodeError, IOError):
+        pass
+    return {}
+
+
 def main():
     # stdin에서 hook 데이터 읽기
     try:
@@ -209,8 +234,23 @@ def main():
     except (json.JSONDecodeError, EOFError):
         hook_input = {}
 
+    cwd = hook_input.get("cwd", os.getcwd())
+
+    # .self-improve 파일이 있는 프로젝트만 수집
+    project_root = find_project_root(cwd)
+    if project_root is None:
+        return  # 이 프로젝트는 자기 개선 대상이 아님 → 조용히 종료
+
+    # 프로젝트 루트를 cwd로 사용 (하위 디렉토리에서 실행해도 일관성 유지)
+    hook_input["cwd"] = project_root
+
     # 평가 실행
     record = evaluate(hook_input)
+
+    # 프로젝트별 커스텀 설정 반영
+    config = load_project_config(project_root)
+    if config:
+        record["config"] = config
 
     # 저장
     scores = load_scores()
