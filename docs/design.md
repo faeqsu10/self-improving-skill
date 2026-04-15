@@ -1,150 +1,252 @@
 # 설계 문서: Self-Improving Skill
 
-## 1. 배경
+## 1. 이 프로젝트가 하는 일
 
-### HyperAgents 핵심 발견
+Claude Code가 나와 작업할 때마다 **자동으로 데이터를 쌓고, 패턴을 분석하고, 다음 세션에서 더 나은 방식으로 작업하게** 만드는 시스템.
 
-Meta의 HyperAgents(2025) 논문에서 핵심적으로 참고할 포인트:
+핵심 원칙: **자동 수집, 자동 분석, 수동 적용.**
 
-1. **메타 에이전트는 극도로 단순해도 된다** — HyperAgents의 meta_agent.py는 18줄. "코드베이스의 아무 부분이나 수정해라"가 전부.
-2. **복잡성은 루프 관리에 있다** — 진화 루프(평가 → 아카이브 → 부모 선택 → 수정 → 재평가)가 핵심.
-3. **에이전트가 자발적으로 발명하는 것들** — 영속 메모리, 성능 추적, 다단계 평가, 도메인 지식 베이스, 편향 감지, 재시도 로직.
-4. **메타 수준 개선은 도메인 간 전이된다** — 한 분야에서 학습한 개선 전략이 새로운 분야에서도 동작.
+---
 
-### 축소 원칙
-
-| HyperAgents (원본) | 이 프로젝트 (축소) |
-|-------------------|------------------|
-| Docker 격리 실행 | Claude Code 세션 |
-| 수백 세대 진화 | 세션 단위 학습 |
-| 4개 도메인 벤치마크 | 프로젝트 내 테스트/lint |
-| LLM API 직접 호출 | Claude Code가 LLM |
-| 아카이브 (세대별 저장) | git 커밋 히스토리 |
-| 부모 선택 알고리즘 | 최근 N개 세션 참조 |
-
-## 2. 아키텍처
-
-### 컴포넌트
+## 2. 전체 흐름
 
 ```
-┌─────────────────────────────────────────┐
-│              Claude Code                 │
-│  ┌─────────┐   ┌──────────┐             │
-│  │  SKILL  │   │ evaluator│             │
-│  │  .md    │──▶│   .py    │──▶ scores   │
-│  │ (메타   │   └──────────┘    .json    │
-│  │  전략)  │   ┌──────────┐             │
-│  │         │◀──│ memory   │◀── memory   │
-│  │         │   │   .py    │    .json    │
-│  └─────────┘   └──────────┘             │
-└─────────────────────────────────────────┘
+╔══════════════════════════════════════════╗
+║         평소처럼 Claude Code 사용          ║
+╚════════════════════╦═════════════════════╝
+                     │
+                세션 종료 (Stop hook 자동 발동)
+                     │
+    ┌────────────────┼────────────────┐
+    ▼                ▼                ▼
+┌─────────┐   ┌──────────┐   ┌──────────┐
+│evaluator│   │ memory   │   │ injector │
+│         │   │          │   │          │
+│이 세션의 │→  │전체 기록  │→  │제안 파일  │
+│지표 수집 │   │패턴 분석  │   │저장      │
+└────┬────┘   └────┬─────┘   └────┬─────┘
+     ▼              ▼              ▼
+scores.json   memory.json   .self-improve-
+(세션 기록부)  (두뇌)        strategies.md
+                             (제안서)
+     │              │              │
+     └──────────────┼──────────────┘
+                    │
+              ✖ 여기서 멈춤
+              ✖ CLAUDE.md는 안 건드림
+                    │
+          사용자가 /self-improve 실행 (수동)
+                    │
+                    ▼
+          ┌──────────────────┐
+          │  제안 + 검증 결과  │
+          │  보여주고 물어봄   │
+          │  "적용할까요?"    │
+          └────────┬─────────┘
+                   │
+          ┌────────┴────────┐
+          ▼                 ▼
+     승인 → CLAUDE.md    거부 → 아무 일도
+     에 반영              안 일어남
 ```
 
-### 핵심 루프
+---
 
+## 3. 핵심 파일 5개
+
+### 소스 코드 (src/)
+
+| 파일 | 줄 수 | 역할 |
+|------|-------|------|
+| `hook-runner.py` | ~45줄 | Stop hook 진입점. stdin을 각 단계에 전달 |
+| `evaluator.py` | ~250줄 | 세션 지표 수집 (git, 테스트, lint, 대화) |
+| `memory.py` | ~280줄 | 패턴 분석 + 전략 도출 |
+| `verifier.py` | ~180줄 | 전략 적용 전/후 지표 비교로 효과 검증 |
+| `injector.py` | ~100줄 | 제안 파일(.self-improve-strategies.md) 생성 |
+
+### 데이터 파일
+
+| 파일 | 위치 | 역할 | 비유 |
+|------|------|------|------|
+| `scores.json` | `~/.config/self-improving-skill/` | 매 세션의 지표 기록 | 일기장 |
+| `memory.json` | `~/.config/self-improving-skill/` | 분석 결과 + 전략 | 두뇌 |
+| `.self-improve-strategies.md` | 프로젝트 루트 | 현재 제안 목록 (gitignore) | 제안서 |
+
+---
+
+## 4. 활성화 방식: opt-in
+
+`.self-improve` 파일이 있는 프로젝트에서만 동작한다.
+
+```bash
+# 활성화
+cd ~/projects/my-project
+touch .self-improve
+
+# 비활성화
+rm .self-improve
 ```
-Session Start
-    │
-    ├── memory.json 로드 (이전 세션의 전략/교훈)
-    │
-    ├── 사용자 작업 수행
-    │
-    ├── evaluator.py 실행
-    │   ├── 테스트 통과율
-    │   ├── lint 점수
-    │   ├── diff 크기 (변경량)
-    │   └── 에러 발생 여부
-    │
-    ├── 평가 결과 → scores.json에 추가
-    │
-    ├── Meta 분석 (Claude Code가 수행)
-    │   ├── 이전 세션 대비 개선/퇴보 판단
-    │   ├── 반복되는 실패 패턴 감지
-    │   └── 새로운 전략 도출
-    │
-    └── memory.json 업데이트
-        ├── 인과 가설 ("X 접근이 Y에서 실패한 이유")
-        ├── 전략 ("다음에는 Z를 먼저 시도")
-        └── 도메인 지식 ("이 프로젝트에서는 A가 중요")
-```
 
-## 3. 데이터 구조
+- 파일이 없는 프로젝트 → 데이터 수집 안 함, 아무 일도 안 일어남
+- 하위 디렉토리에서 작업해도 상위의 `.self-improve`를 찾아서 동작
 
-### memory.json
+### 커스텀 설정 (선택)
 
 ```json
+// .self-improve
 {
-  "version": 1,
-  "strategies": [
-    {
-      "id": "s001",
-      "created": "2026-04-14",
-      "context": "리팩토링 작업",
-      "insight": "큰 함수를 나눌 때 테스트를 먼저 확인해야 한다",
-      "source": "session-003에서 테스트 없이 리팩토링 → 회귀 버그 발생",
-      "success_count": 0,
-      "fail_count": 1
-    }
-  ],
-  "domain_knowledge": [
-    {
-      "project": "dalpintong",
-      "facts": ["Flask 기반", "SQLite 사용", "테스트 커버리지 낮음"]
-    }
-  ],
-  "anti_patterns": [
-    {
-      "pattern": "테스트 없이 대규모 리팩토링",
-      "detected_count": 2,
-      "last_seen": "2026-04-14"
-    }
-  ]
+  "test_cmd": "python3 -m pytest tests/ -q",
+  "lint_cmd": "ruff check ."
 }
 ```
 
-### scores.json
+빈 파일이면 자동 감지.
 
-```json
-{
-  "sessions": [
-    {
-      "id": "session-001",
-      "date": "2026-04-14",
-      "project": "dalpintong",
-      "task_type": "refactor",
-      "metrics": {
-        "tests_passed": 0.85,
-        "lint_score": 0.92,
-        "diff_lines": 45,
-        "errors": 0
-      },
-      "strategies_used": ["s001"],
-      "outcome": "success"
-    }
-  ]
-}
+---
+
+## 5. 검증 시스템
+
+HyperAgents의 "평가 → 우수한 것만 아카이브"를 축소 구현.
+
+### 검증 흐름
+
+```
+전략 생성 (memory.py)
+    │
+    ▼
+적용 전 세션 지표 ←→ 적용 후 세션 지표 비교 (verifier.py)
+    │
+    ├── 지표 개선됨    → verified   (적용 권장)
+    ├── 지표 악화됨    → unverified (제거 권장)
+    ├── 변화 없음      → neutral    (사용자 판단)
+    └── 데이터 부족    → pending    (아직 판단 불가)
 ```
 
-## 4. 구현 단계
+### 비교 지표
 
-### Phase 1: Hook 기반 (최소 구현)
-- Claude Code Stop hook으로 세션 종료 시 자동 평가
-- 결과를 scores.json에 저장
-- memory.json은 수동 관리
+| 지표 | 수집 방법 |
+|------|----------|
+| 세션 에러 수 | transcript 로그 분석 |
+| 테스트 통과율 | pytest/npm 자동 실행 |
+| lint 에러 수 | ruff/flake8 자동 실행 |
+| 미커밋 비율 | git status 확인 |
 
-### Phase 2: Skill 기반 (메타 분석 추가)
-- `/self-improve` 스킬로 메타 분석 트리거
-- memory.json 자동 업데이트
-- 이전 세션 대비 성장/퇴보 리포트
+### 최소 데이터 요구
 
-### Phase 3: 자기 수정 (HyperAgents 핵심)
-- SKILL.md 자체를 세션 결과에 따라 업데이트
-- 평가 기준도 자기 수정 대상
-- 전략의 성공/실패 추적으로 전략 자체를 진화
+- 전략 적용 **전** 3개 세션 이상
+- 전략 적용 **후** 3개 세션 이상
+- 미달 시 `pending` (판단 보류)
 
-## 5. 참고 자료
+---
 
-- [HyperAgents 논문](https://arxiv.org/abs/2603.19461)
-- [facebookresearch/Hyperagents](https://github.com/facebookresearch/Hyperagents)
-- [AI Paper Wiki: summary-hyperagents](/mnt/c/work/projects/llm-wiki/ai-paper-wiki/wiki/sources/summary-hyperagents.md)
-- [NotebookLM 분석](https://notebooklm.google.com/notebook/02550f76-e131-45cd-92ed-74c4f5d5edf9)
+## 6. CLAUDE.md 수정 규칙
+
+**자동 수정 없음.** 사용자가 `/self-improve`로 승인해야만 수정됨.
+
+수정 시 마커 블록만 사용:
+
+```markdown
+# (프로젝트 기존 CLAUDE.md 내용 — 전부 그대로)
+
+<!-- self-improve:start -->
+## 자기 개선 전략 (승인됨)
+- 전략 1
+- 전략 2
+<!-- self-improve:end -->
+```
+
+- 마커 안쪽만 교체
+- 마커 밖은 절대 수정 안 함
+- 마커 블록이 없으면 맨 끝에 추가
+
+---
+
+## 7. 감지하는 안티패턴 (4종)
+
+| 패턴 | 발동 조건 | 제안 |
+|------|----------|------|
+| 테스트 없이 반복 작업 | 테스트 total=0인 세션 3회 이상 | 기본 테스트 추가 |
+| lint 에러 방치 | lint error > 5인 세션 2회 이상 | 세션 시작 시 lint 먼저 |
+| 세션 중 에러 빈발 | error > 3인 세션 3회 이상 | 접근 방식 변경 |
+| 미커밋 변경 방치 | 70% 이상 세션에서 미커밋 | 자주 커밋 |
+
+---
+
+## 8. 설치
+
+### 로컬 또는 원격 서버에 설치 (1회)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/faeqsu10/self-improving-skill/main/install.sh | bash
+```
+
+이 스크립트가 하는 일:
+1. `~/.config/self-improving-skill/repo/`에 소스 다운로드
+2. `~/.claude/settings.json`에 Stop hook 등록
+3. `~/.claude/skills/self-improve/`에 스킬 설치
+
+### 프로젝트에서 활성화
+
+```bash
+cd ~/projects/my-project
+touch .self-improve
+```
+
+### 사용
+
+```bash
+# 세션에서 분석 요청
+/self-improve
+
+# 또는 터미널에서 직접
+python3 ~/.config/self-improving-skill/src/memory.py summary
+python3 ~/.config/self-improving-skill/src/verifier.py
+```
+
+---
+
+## 9. HyperAgents 논문과의 대응
+
+| HyperAgents | 이 프로젝트 | 차이 |
+|-------------|-----------|------|
+| Meta Agent (18줄) | injector.py | 자동 주입 → 제안만 저장 |
+| Task Agent (44줄) | Claude Code 자체 | 동일 |
+| Archive | scores.json + git | 동일 개념 |
+| PerformanceTracker | evaluator.py | 동일 개념 |
+| MemoryTool | memory.py + memory.json | 동일 개념 |
+| 평가 → 아카이브 | verifier.py | 전/후 지표 비교 |
+| Docker 격리 | Claude Code 세션 | 더 가벼움 |
+| 자동 수정 | 사용자 승인 후 수정 | 더 안전 |
+
+핵심 차이: HyperAgents는 자동으로 수백 번 돌리지만, 이 프로젝트는 **평소 작업하면서 자연스럽게 쌓이고, 사용자가 판단**한다.
+
+---
+
+## 10. 파일 구조 전체
+
+```
+self-improving-skill/              ← GitHub: faeqsu10/self-improving-skill
+├── README.md                      ← 사용법 가이드
+├── CLAUDE.md                      ← 프로젝트 규칙
+├── install.sh                     ← 원커맨드 설치 스크립트
+├── .self-improve                  ← 이 프로젝트도 자기 개선 대상
+├── .gitignore
+├── src/
+│   ├── hook-runner.py             ← Stop hook 진입점
+│   ├── evaluator.py               ← 세션 자동 평가
+│   ├── memory.py                  ← 패턴 분석 + 전략 도출
+│   ├── verifier.py                ← 전략 효과 검증
+│   └── injector.py                ← 제안 파일 생성
+├── skill/
+│   └── SKILL.md                   ← /self-improve 스킬 정의
+└── docs/
+    └── design.md                  ← 이 파일
+
+데이터 (서버별 로컬):
+~/.config/self-improving-skill/
+├── scores.json                    ← 세션 기록 (최근 100개)
+└── memory.json                    ← 분석 결과 + 전략
+
+프로젝트별 (gitignore):
+<project>/.self-improve-strategies.md  ← 현재 제안 목록
+```
