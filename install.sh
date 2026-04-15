@@ -42,7 +42,7 @@ if [ ! -f "$SETTINGS_FILE" ]; then
   echo '{}' > "$SETTINGS_FILE"
 fi
 
-HOOK_CMD="python3 $INSTALL_DIR/src/evaluator.py && python3 $INSTALL_DIR/src/memory.py analyze > /dev/null 2>&1 && python3 $INSTALL_DIR/src/injector.py"
+HOOK_CMD="python3 $INSTALL_DIR/src/hook-runner.py"
 
 # 이미 등록되어 있는지 확인
 if grep -q "self-improving-skill" "$SETTINGS_FILE" 2>/dev/null; then

@@ -2,23 +2,22 @@
 """
 Self-Improving Skill — Phase 3: Strategy Injector
 
-memory.json의 전략을 ~/.claude/CLAUDE.md에 자동 주입한다.
-Claude Code가 매 세션 시작 시 CLAUDE.md를 읽으므로,
-여기에 전략을 넣으면 다음 세션부터 자동 반영된다.
+memory.json의 전략을 해당 프로젝트의 CLAUDE.md에 자동 주입한다.
+프로젝트별로 분리되어 다른 프로젝트에 영향을 주지 않는다.
 
 Stop hook에서 evaluator.py 다음에 실행:
     python3 evaluator.py  →  python3 injector.py
 
-또는 단독 실행:
-    python3 injector.py
+stdin으로 hook 데이터를 받아 cwd에서 프로젝트를 판별한다.
 """
 
 import json
+import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
 MEMORY_FILE = Path.home() / ".config" / "self-improving-skill" / "memory.json"
-CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
 
 # 주입 블록의 시작/끝 마커
 MARKER_START = "<!-- self-improve:start -->"
@@ -35,11 +34,30 @@ def load_memory() -> dict:
     return {}
 
 
-def generate_block(memory: dict) -> str:
-    """memory.json에서 Claude Code가 읽을 전략 블록을 생성한다."""
-    strategies = [s for s in memory.get("strategies", []) if s.get("active")]
-    anti_patterns = memory.get("anti_patterns", [])
+def find_project_root(cwd: str) -> str | None:
+    """cwd에서 위로 올라가며 .self-improve 파일이 있는 프로젝트 루트를 찾는다."""
+    current = Path(cwd).resolve()
+    home = Path.home().resolve()
+    while current >= home:
+        if (current / ".self-improve").exists():
+            return str(current)
+        if current == home:
+            break
+        current = current.parent
+    return None
+
+
+def generate_block(memory: dict, project_name: str | None = None) -> str:
+    """memory.json에서 해당 프로젝트에 맞는 전략 블록을 생성한다."""
+    all_strategies = [s for s in memory.get("strategies", []) if s.get("active")]
+    all_anti_patterns = memory.get("anti_patterns", [])
     last_analyzed = memory.get("last_analyzed", "없음")
+
+    # 해당 프로젝트 + 전체(project=null) 전략만 필터링
+    strategies = [s for s in all_strategies
+                  if s.get("project") is None or s.get("project") == project_name]
+    anti_patterns = [ap for ap in all_anti_patterns
+                     if ap.get("project") is None or ap.get("project") == project_name]
 
     if not strategies and not anti_patterns:
         return ""
@@ -69,14 +87,15 @@ def generate_block(memory: dict) -> str:
     return "\n".join(lines)
 
 
-def inject(block: str):
-    """CLAUDE.md에 전략 블록을 주입/갱신한다."""
-    if not CLAUDE_MD.exists():
-        CLAUDE_MD.parent.mkdir(parents=True, exist_ok=True)
-        CLAUDE_MD.write_text(block + "\n")
+def inject(claude_md_path: Path, block: str):
+    """프로젝트의 CLAUDE.md에 전략 블록을 주입/갱신한다."""
+    if not claude_md_path.exists():
+        if not block:
+            return  # 전략도 없고 CLAUDE.md도 없으면 아무것도 안 함
+        claude_md_path.write_text(block + "\n")
         return
 
-    content = CLAUDE_MD.read_text()
+    content = claude_md_path.read_text()
 
     # 기존 블록이 있으면 교체
     if MARKER_START in content:
@@ -91,13 +110,29 @@ def inject(block: str):
         # 기존 블록이 없으면 맨 끝에 추가
         content = content.rstrip("\n") + "\n\n" + block + "\n"
 
-    CLAUDE_MD.write_text(content)
+    claude_md_path.write_text(content)
 
 
 def main():
+    # stdin에서 hook 데이터 읽기 (cwd 판별용)
+    try:
+        hook_input = json.load(sys.stdin)
+    except (json.JSONDecodeError, EOFError):
+        hook_input = {}
+
+    cwd = hook_input.get("cwd", os.getcwd())
+
+    # .self-improve가 있는 프로젝트만 처리
+    project_root = find_project_root(cwd)
+    if project_root is None:
+        return
+
+    project_name = Path(project_root).name
+    claude_md_path = Path(project_root) / "CLAUDE.md"
+
     memory = load_memory()
-    block = generate_block(memory)
-    inject(block)
+    block = generate_block(memory, project_name)
+    inject(claude_md_path, block)
 
 
 if __name__ == "__main__":
