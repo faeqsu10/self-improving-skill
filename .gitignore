@@ -1,6 +1,7 @@
 # Runtime data
 .meta/memory.json
 .meta/scores.json
+.self-improve-strategies.md
 
 # Python
 __pycache__/
